@@ -1,0 +1,3 @@
+The input shows that only a `.gitignore` file was added, with no other file changes listed. Since there are no compiled files, dependencies, temporary files, or any other artifacts to ignore, and the change list contains only the `.gitignore` itself, no additional rules are needed.
+
+(empty — output nothing)
