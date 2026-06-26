@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>Hollow Knight Clone - JS Edition</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #050505; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        canvas { display: block; image-rendering: pixelated; }
+        #ui { position: absolute; top: 20px; left: 20px; color: white; pointer-events: none; user-select: none; }
+        .mask { width: 30px; height: 30px; background: #fff; mask-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="45"/></svg>'); display: inline-block; margin-right: 5px; opacity: 0.3; transition: opacity 0.2s; }
+        .mask.active { opacity: 1; box-shadow: 0 0 10px #fff; }
+        #controls-hint { position: absolute; bottom: 20px; right: 20px; color: #888; font-size: 12px; text-align: left; direction: ltr; }
+        #boss-health-bar { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); width: 400px; height: 20px; background: #333; border: 2px solid #555; display: none; }
+        #boss-health-fill { width: 100%; height: 100%; background: #d32f2f; transition: width 0.2s; }
+        #boss-name { position: absolute; top: -25px; width: 100%; text-align: center; color: #d32f2f; font-weight: bold; text-shadow: 0 0 5px red; }
+        .damage-text { position: absolute; color: #fff; font-weight: bold; font-size: 20px; animation: floatUp 1s forwards; pointer-events: none; }
+        @keyframes floatUp { to { transform: translateY(-50px); opacity: 0; } }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div id="masks-container"></div>
+    <div style="margin-top:10px; font-size: 14px; color: #aaa;">Geo: <span id="geo-count">0</span></div>
+    <div style="font-size: 12px; color: #666; margin-top:5px;" id="area-name">Forgotten Crossroads</div>
+</div>
+
+<div id="boss-health-bar">
+    <div id="boss-name">BOSS</div>
+    <div id="boss-health-fill"></div>
+</div>
+
+<div id="controls-hint">
+    ARROWS: Move | Z: Jump (Double Jump) | X: Attack | C: Dash<br>
+    R: Restart Checkpoint
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * HOLLOW KNIGHT CLONE ENGINE
+ * A comprehensive platformer engine with physics, combat, AI, and particle systems.
+ * Written in pure Vanilla JS + Canvas API.
+ */
+
+// --- CONSTANTS & CONFIG ---
+const TILE_SIZE = 40;
+const GRAVITY = 0.6;
+const FRICTION = 0.8;
+const MOVE_SPEED = 5;
+const JUMP_FORCE = -14;
+const DASH_SPEED = 15;
+const DASH_DURATION = 10;
+const ATTACK_DURATION = 15;
+const INVINCIBILITY_FRAMES = 60;
+
+// --- UTILS ---
+const rectIntersect = (r1, r2) => !(r2.left > r1.right || r2.right < r1.left || r2.top > r1.bottom || r2.bottom < r1.top);
+const rand = (min, max) => Math.random() * (max - min) + min;
+
+// --- INPUT HANDLER ---
+class InputHandler {
+    constructor() {
+        this.keys = {};
+        window.addEventListener('keydown', e => this.keys[e.code] = true);
+        window.addEventListener('keyup', e => this.keys[e.code] = false);
+    }
+    isDown(code) { return !!this.keys[code]; }
+}
+
+// --- CAMERA ---
+class Camera {
+    constructor(width, height) {
+        this.x = 0;
+        this.y = 0;
+        this.width = width;
+        this.height = height;
+        this.target = null;
+        this.shakeTime = 0;
+        this.shakeStrength = 0;
+    }
+
+    follow(target) {
+        this.target = target;
+    }
+
+    update() {
+        if (!this.target) return;
+        
+        // Smooth follow
+        const targetX = this.target.x + this.target.width / 2 - this.width / 2;
+        const targetY = this.target.y + this.target.height / 2 - this.height / 2;
+        
+        this.x += (targetX - this.x) * 0.1;
+        this.y += (targetY - this.y) * 0.1;
+
+        // Screen shake decay
+        if (this.shakeTime > 0) {
+            this.shakeTime--;
+            this.x += rand(-this.shakeStrength, this.shakeStrength);
+            this.y += rand(-this.shakeStrength, this.shakeStrength);
+        }
+    }
+
+    shake(strength, duration) {
+        this.shakeStrength = strength;
+        this.shakeTime = duration;
+    }
+}
+
+// --- PARTICLE SYSTEM ---
+class Particle {
+    constructor(x, y, color, speed, life) {
+        this.x = x;
+        this.y = y;
+        this.color = color;
+        this.vx = rand(-speed, speed);
+        this.vy = rand(-speed, speed);
+        this.life = life;
+        this.maxLife = life;
+        this.size = rand(2, 5);
+    }
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.vy += 0.2; // Gravity
+        this.life--;
+        this.size *= 0.95;
+    }
+    draw(ctx, camX, camY) {
+        ctx.globalAlpha = this.life / this.maxLife;
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x - camX, this.y - camY, this.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+}
+
+// --- GAME ENTITIES ---
+
+class Entity {
+    constructor(x, y, w, h, color) {
+        this.x = x;
+        this.y = y;
+        this.width = w;
+        this.height = h;
+        this.color = color;
+        this.vx = 0;
+        this.vy = 0;
+        this.grounded = false;
+        this.facingRight = true;
+        this.dead = false;
+        this.hp = 10;
+        this.maxHp = 10;
+        this.invulnerable = 0;
+    }
+
+    getBounds() {
+        return { left: this.x, right: this.x + this.width, top: this.y, bottom: this.y + this.height };
+    }
+
+    takeDamage(amount) {
+        if (this.invulnerable > 0 || this.dead) return;
+        this.hp -= amount;
+        this.invulnerable = INVINCIBILITY_FRAMES;
+        game.camera.shake(5, 10);
+        game.spawnParticles(this.x + this.width/2, this.y + this.height/2, '#fff', 5, 10);
+        if (this.hp <= 0) this.die();
+        game.ui.updateHealth();
+    }
+
+    die() {
+        this.dead = true;
+        game.spawnParticles(this.x + this.width/2, this.y + this.height/2, this.color, 10, 30);
+    }
+
+    updatePhysics(platforms) {
+        // Apply Gravity
+        this.vy += GRAVITY;
+        this.vx *= FRICTION;
+
+        // Move X
+        this.x += this.vx;
+        this.checkCollisions(platforms, 'x');
+
+        // Move Y
+        this.y += this.vy;
+        this.grounded = false;
+        this.checkCollisions(platforms, 'y');
+
+        // World Bounds
+        if (this.y > 2000) this.die(); // Fall death
+
+        if (this.invulnerable > 0) this.invulnerable--;
+    }
+
+    checkCollisions(platforms, axis) {
+        const bounds = this.getBounds();
+        for (let p of platforms) {
+            if (rectIntersect(bounds, p.getBounds())) {
+                if (axis === 'x') {
+                    if (this.vx > 0) this.x = p.x - this.width;
+                    else if (this.vx < 0) this.x = p.x + p.width;
+                    this.vx = 0;
+                } else {
+                    if (this.vy > 0) {
+                        this.y = p.y - this.height;
+                        this.grounded = true;
+                        this.vy = 0;
+                    } else if (this.vy < 0) {
+                        this.y = p.y + p.height;
+                        this.vy = 0;
+                    }
+                }
+            }
+        }
+    }
+    
+    draw(ctx, camX, camY) {
+        if (this.invulnerable > 0 && Math.floor(Date.now() / 50) % 2 === 0) return; // Flicker
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x - camX, this.y - camY, this.width, this.height);
+    }
+}
+
+class Player extends Entity {
+    constructor(x, y) {
+        super(x, y, 30, 40, '#eee'); // White knight
+        this.jumpCount = 0;
+        this.maxJumps = 2;
+        this.isDashing = false;
+        this.dashTimer = 0;
+        this.dashCooldown = 0;
+        this.isAttacking = false;
+        this.attackTimer = 0;
+        this.geo = 0;
+        this.soul = 0;
+    }
+
+    update(input, platforms, enemies) {
+        if (this.dead) return;
+
+        // Movement
+        if (!this.isDashing) {
+            if (input.isDown('ArrowRight')) {
+                this.vx += 1;
+                this.facingRight = true;
+            }
+            if (input.isDown('ArrowLeft')) {
+                this.vx -= 1;
+                this.facingRight = false;
+            }
+            
+            // Cap speed
+            if (this.vx > MOVE_SPEED) this.vx = MOVE_SPEED;
+            if (this.vx < -MOVE_SPEED) this.vx = -MOVE_SPEED;
+
+            // Jump
+            if (input.isDown('KeyZ') && !this.jumpKeyHeld) {
+                if (this.grounded || this.jumpCount < this.maxJumps) {
+                    this.vy = JUMP_FORCE;
+                    this.jumpCount++;
+                    game.spawnParticles(this.x + this.width/2, this.y + this.height, '#ccc', 3, 5);
+                }
+                this.jumpKeyHeld = true;
+            }
+            if (!input.isDown('KeyZ')) this.jumpKeyHeld = false;
+
+            // Dash
+            if (input.isDown('KeyC') && this.dashCooldown <= 0) {
+                this.isDashing = true;
+                this.dashTimer = DASH_DURATION;
+                this.dashCooldown = 40;
+                this.vx = this.facingRight ? DASH_SPEED : -DASH_SPEED;
+                this.vy = 0;
+                game.camera.shake(3, 5);
+                game.spawnParticles(this.x + this.width/2, this.y + this.height/2, '#aaf', 5, 15);
+            }
+        } else {
+            // Dashing logic
+            this.dashTimer--;
+            if (this.dashTimer <= 0) {
+                this.isDashing = false;
+                this.vx = 0;
+            }
+        }
+        if (this.dashCooldown > 0) this.dashCooldown--;
+
+        // Attack
+        if (input.isDown('KeyX') && !this.attackKeyHeld && !this.isAttacking) {
+            this.isAttacking = true;
+            this.attackTimer = ATTACK_DURATION;
+            this.attackHit = false;
+            
+            // Create hitbox
+            const reach = 40;
+            const attackBox = {
+                left: this.facingRight ? this.x + this.width : this.x - reach,
+                right: this.facingRight ? this.x + this.width + reach : this.x,
+                top: this.y,
+                bottom: this.y + this.height,
+                damage: 2
+            };
+
+            // Check enemy hits
+            enemies.forEach(e => {
+                if (!e.dead && rectIntersect(attackBox, e.getBounds())) {
+                    e.takeDamage(attackBox.damage);
+                    e.vx = this.facingRight ? 5 : -5;
+                    e.vy = -3;
+                    this.soul = Math.min(this.soul + 5, 100);
+                    game.ui.updateHealth();
+                    
+                    // Floating text
+                    game.showDamageText(e.x, e.y, "2");
+                }
+            });
+            
+            // Visual slash
+            game.slashes.push({x: attackBox.left, y: attackBox.top, w: attackBox.right - attackBox.left, h: attackBox.bottom - attackBox.top, life: 10, facing: this.facingRight});
+        }
+        if (!input.isDown('KeyX')) this.attackKeyHeld = false;
+        else this.attackKeyHeld = true;
+
+        if (this.isAttacking) {
+            this.attackTimer--;
+            if (this.attackTimer <= 0) this.isAttacking = false;
+            // Stop movement while attacking slightly
+            this.vx *= 0.5;
+        }
+
+        this.updatePhysics(platforms);
+        
+        // Check Bench (Save Point)
+        game.benches.forEach(b => {
+            if (rectIntersect(this.getBounds(), b.getBounds()) && input.isDown('ArrowUp')) {
+                b.activate();
+            }
+        });
+    }
+
+    draw(ctx, camX, camY) {
+        if (this.dead) return;
+        
+        const drawX = this.x - camX;
+        const drawY = this.y - camY;
+
+        // Body
+        ctx.fillStyle = '#ddd';
+        ctx.beginPath();
+        ctx.ellipse(drawX + this.width/2, drawY + this.height/2, this.width/2, this.height/2, 0, 0, Math.PI*2);
+        ctx.fill();
+
+        // Mask Eyes
+        ctx.fillStyle = '#000';
+        const eyeOffset = this.facingRight ? 4 : -4;
+        ctx.beginPath();
+        ctx.ellipse(drawX + this.width/2 + eyeOffset - 5, drawY + 15, 4, 6, 0, 0, Math.PI*2);
+        ctx.ellipse(drawX + this.width/2 + eyeOffset + 5, drawY + 15, 4, 6, 0, 0, Math.PI*2);
+        ctx.fill();
+
+        // Cloak trail
+        if (Math.abs(this.vx) > 1) {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+            ctx.beginPath();
+            ctx.moveTo(drawX + this.width/2, drawY + this.height);
+            ctx.lineTo(drawX + this.width/2 - this.vx * 2, drawY + this.height + 10);
+            ctx.lineTo(drawX + this.width/2 + this.vx * 2, drawY + this.height + 10);
+            ctx.fill();
+        }
+
+        // Slash Effect
+        if (this.isAttacking) {
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            const arcStart = this.facingRight ? -Math.PI/4 : Math.PI + Math.PI/4;
+            const arcEnd = this.facingRight ? Math.PI/4 : Math.PI - Math.PI/4;
+            ctx.arc(drawX + this.width/2, drawY + this.height/2, 35, arcStart, arcEnd);
+            ctx.stroke();
+        }
+    }
+}
+
+class Enemy extends Entity {
+    constructor(x, y, type) {
+        super(x, y, 30, 30, type === 'crawler' ? '#855' : '#585');
+        this.type = type;
+        this.patrolStart = x;
+        this.patrolDist = 100;
+        this.state = 'patrol'; // patrol, chase, attack
+        this.timer = 0;
+        this.hp = type === 'crawler' ? 3 : 5;
+        this.maxHp = this.hp;
+    }
+
+    update(player, platforms) {
+        if (this.dead) return;
+
+        const distToPlayer = Math.hypot(player.x - this.x, player.y - this.y);
+        const canSeePlayer = Math.abs(player.y - this.y) < 100 && distToPlayer < 300;
+
+        if (this.type === 'crawler') {
+            // Simple patrol
+            this.vx = Math.sin(Date.now() / 500) * 2;
+            if (player.x < this.x) this.facingRight = false;
+            else this.facingRight = true;
+        } else if (this.type === 'guard') {
+            if (canSeePlayer && !player.dead) {
+                this.state = 'chase';
+                const dir = player.x > this.x ? 1 : -1;
+                this.vx = dir * 3;
+                this.facingRight = dir > 0;
+                
+                if (distToPlayer < 60 && this.timer <= 0) {
+                    this.state = 'attack';
+                    this.timer = 60;
+                    this.vy = -5; // Lunge
+                }
+            } else {
+                this.state = 'patrol';
+                this.vx = 0;
+                if (Math.abs(this.x - this.patrolStart) > this.patrolDist) {
+                    this.vx = -this.vx || (Math.random() > 0.5 ? 2 : -2);
+                }
+            }
+        }
+
+        if (this.timer > 0) this.timer--;
+        this.updatePhysics(platforms);
+
+        // Damage Player
+        if (rectIntersect(this.getBounds(), player.getBounds()) && !player.isDashing) {
+            player.takeDamage(1);
+        }
+    }
+
+    draw(ctx, camX, camY) {
+        if (this.dead) return;
+        super.draw(ctx, camX, camY);
+        
+        // Draw Eyes
+        ctx.fillStyle = '#fff';
+        const ex = this.facingRight ? this.x + 20 : this.x + 5;
+        ctx.fillRect(ex - camX, this.y + 8 - camY, 5, 5);
+        
+        // Health bar for elites
+        if (this.type === 'guard') {
+            ctx.fillStyle = 'red';
+            ctx.fillRect(this.x - camX, this.y - 10 - camY, this.width, 4);
+            ctx.fillStyle = '#0f0';
+            ctx.fillRect(this.x - camX, this.y - 10 - camY, this.width * (this.hp/this.maxHp), 4);
+        }
+    }
+}
+
+class Boss extends Entity {
+    constructor(x, y) {
+        super(x, y, 80, 100, '#422');
+        this.name = "FALSE KNIGHT";
+        this.phase = 1;
+        this.actionTimer = 0;
+        this.currentAction = 'idle';
+        this.hp = 50;
+        this.maxHp = 50;
+        game.ui.showBossBar(this.name, this.hp, this.maxHp);
+    }
+
+    update(player, platforms) {
+        if (this.dead) {
+            game.ui.hideBossBar();
+            return;
+        }
+
+        const dist = Math.hypot(player.x - this.x, player.y - this.y);
+        
+        // AI State Machine
+        if (this.actionTimer <= 0) {
+            const randAction = Math.random();
+            if (randAction < 0.4) this.currentAction = 'slam';
+            else if (randAction < 0.7) this.currentAction = 'jump';
+            else this.currentAction = 'charge';
+            
+            this.actionTimer = rand(60, 120);
+        }
+
+        switch (this.currentAction) {
+            case 'slam':
+                if (this.actionTimer < 90 && this.actionTimer > 80) {
+                    // Windup
+                    this.vy = 0; this.vx = 0;
+                    game.camera.shake(2, 5);
+                } else if (this.actionTimer === 80) {
+                    this.vy = -15;
+                    this.vx = (player.x - this.x) * 0.05;
+                }
+                break;
+            case 'jump':
+                if (this.grounded && this.actionTimer % 20 === 0) {
+                    this.vy = -12;
+                    this.vx = (player.x - this.x) > 0 ? 3 : -3;
+                }
+                break;
+            case 'charge':
+                this.vx = (player.x > this.x ? 1 : -1) * 4;
+                break;
+        }
+
+        this.actionTimer--;
+        this.updatePhysics(platforms);
+
+        // Collision with player
+        if (rectIntersect(this.getBounds(), player.getBounds())) {
+            player.takeDamage(2);
+            // Bounce player
+            player.vy = -5;
+            player.vx = (player.x - this.x) * 0.5;
+        }
+
+        // Update UI
+        game.ui.updateBossHealth(this.hp, this.maxHp);
+    }
+
+    draw(ctx, camX, camY) {
+        if (this.dead) return;
+        
+        const dx = this.x - camX;
+        const dy = this.y - camY;
+
+        // Armor
+        ctx.fillStyle = '#633';
+        ctx.fillRect(dx, dy, this.width, this.height);
+        
+        // Helmet
+        ctx.fillStyle = '#844';
+        ctx.beginPath();
+        ctx.moveTo(dx, dy);
+        ctx.lineTo(dx + this.width/2, dy - 20);
+        ctx.lineTo(dx + this.width, dy);
+        ctx.fill();
+
+        // Eyes
+        ctx.fillStyle = '#ff0';
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#ff0';
+        ctx.fillRect(dx + 20, dy + 30, 10, 10);
+        ctx.fillRect(dx + 50, dy + 30, 10, 10);
+        ctx.shadowBlur = 0;
+        
+        // Weapon (Greatsword)
+        if (this.currentAction === 'slam' && this.actionTimer > 50) {
+            ctx.fillStyle = '#ccc';
+            ctx.save();
+            ctx.translate(dx + 40, dy + 50);
+            ctx.rotate(-Math.PI/4);
+            ctx.fillRect(-10, -60, 20, 80);
+            ctx.restore();
+        }
+    }
+    
+    die() {
+        super.die();
+        game.spawnParticles(this.x + this.width/2, this.y + this.height/2, '#gold', 20, 100);
+        setTimeout(() => {
+            alert("VICTORY! The False Knight is defeated.");
+            game.resetLevel();
+        }, 1000);
+    }
+}
+
+class Bench {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.width = 40;
+        this.height = 20;
+        this.lit = false;
+        this.saved = false;
+    }
+    
+    getBounds() {
+        return { left: this.x, right: this.x + this.width, top: this.y, bottom: this.y + this.height };
+    }
+
+    activate() {
+        if (!this.lit) {
+            this.lit = true;
+            game.player.hp = game.player.maxHp;
+            game.player.x = this.x;
+            game.player.y = this.y - 50;
+            game.ui.updateHealth();
+            game.spawnParticles(this.x + 20, this.y, '#fff', 5, 20);
+            game.showMessage("BENCH SAVED");
+        }
+    }
+
+    draw(ctx, camX, camY) {
+        const dx = this.x - camX;
+        const dy = this.y - camY;
+        
+        // Bench Leg
+        ctx.fillStyle = '#555';
+        ctx.fillRect(dx + 5, dy + 10, 5, 10);
+        ctx.fillRect(dx + 30, dy + 10, 5, 10);
+        
+        // Seat
+        ctx.fillStyle = this.lit ? '#aaf' : '#333';
+        ctx.fillRect(dx, dy, 40, 10);
+        
+        // Flame
+        if (this.lit) {
+            ctx.fillStyle = `hsl(${Math.random()*60}, 100%, 50%)`;
+            ctx.beginPath();
+            ctx.arc(dx + 20, dy - 10, 8 + Math.random()*4, 0, Math.PI*2);
+            ctx.fill();
+        }
+    }
+}
+
+class Platform {
+    constructor(x, y, w, h, type = 'solid') {
+        this.x = x;
+        this.y = y;
+        this.width = w;
+        this.height = h;
+        this.type = type;
+    }
+    getBounds() {
+        return { left: this.x, right: this.x + this.width, top: this.y, bottom: this.y + this.height };
+    }
+    draw(ctx, camX, camY) {
+        const dx = this.x - camX;
+        const dy = this.y - camY;
+        
+        // Optimization: Don't draw if off screen
+        if (dx + this.width < 0 || dx > ctx.canvas.width || dy + this.height < 0 || dy > ctx.canvas.height) return;
+
+        if (this.type === 'solid') {
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(dx, dy, this.width, this.height);
+            // Detail
+            ctx.strokeStyle = '#333';
+            ctx.strokeRect(dx, dy, this.width, this.height);
+            
+            // Moss/Grass top
+            if (this.height < 50) {
+                ctx.fillStyle = '#242';
+                ctx.fillRect(dx, dy, this.width, 5);
+            }
+        } else if (this.type === 'spike') {
+            ctx.fillStyle = '#888';
+            const spikes = Math.floor(this.width / 20);
+            for(let i=0; i<spikes; i++) {
+                ctx.beginPath();
+                ctx.moveTo(dx + i*20, dy + this.height);
+                ctx.lineTo(dx + i*20 + 10, dy);
+                ctx.lineTo(dx + i*20 + 20, dy + this.height);
+                ctx.fill();
+            }
+        }
+    }
+}
+
+// --- UI MANAGER ---
+class UIManager {
+    constructor() {
+        this.maskContainer = document.getElementById('masks-container');
+        this.geoEl = document.getElementById('geo-count');
+        this.bossBar = document.getElementById('boss-health-bar');
+        this.bossFill = document.getElementById('boss-health-fill');
+        this.areaName = document.getElementById('area-name');
+        this.masks = [];
+    }
+
+    init(maxMasks) {
+        this.maskContainer.innerHTML = '';
+        this.masks = [];
+        for(let i=0; i<maxMasks; i++) {
+            const m = document.createElement('div');
+            m.className = 'mask active';
+            this.maskContainer.appendChild(m);
+            this.masks.push(m);
+        }
+    }
+
+    updateHealth() {
+        const p = game.player;
+        const totalMasks = Math.ceil(p.maxHp / 2); // 2 HP per mask usually, simplified here to 1 HP = 1 mask part? Let's do 1 Mask = 2 HP
+        // Actually Hollow Knight: 1 Mask = 2 Health points (usually). 
+        // Let's simplify: Player HP is direct masks for this demo.
+        
+        // Re-render masks based on current HP
+        this.maskContainer.innerHTML = '';
+        for(let i=0; i<p.hp; i++) {
+            const m = document.createElement('div');
+            m.className = 'mask active';
+            this.maskContainer.appendChild(m);
+        }
+        for(let i=p.hp; i<p.maxHp; i++) {
+            const m = document.createElement('div');
+            m.className = 'mask';
+            this.maskContainer.appendChild(m);
+        }
+        
+        this.geoEl.innerText = p.geo;
+    }
+
+    showBossBar(name, hp, max) {
+        this.bossBar.style.display = 'block';
+        document.getElementById('boss-name').innerText = name;
+        this.updateBossHealth(hp, max);
+    }
+
+    updateBossHealth(hp, max) {
+        const pct = (hp / max) * 100;
+        this.bossFill.style.width = pct + '%';
+    }
+
+    hideBossBar() {
+        this.bossBar.style.display = 'none';
+    }
+    
+    setArea(name) {
+        this.areaName.innerText = name;
+    }
+}
+
+// --- MAIN GAME CLASS ---
+class Game {
+    constructor() {
+        this.canvas = document.getElementById('gameCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+
+        this.input = new InputHandler();
+        this.camera = new Camera(this.canvas.width, this.canvas.height);
+        this.ui = new UIManager();
+        
+        this.particles = [];
+        this.slashes = [];
+        this.messages = [];
+        
+        this.levelData = null;
+        this.loadLevel(1);
+        
+        this.loop = this.loop.bind(this);
+        requestAnimationFrame(this.loop);
+    }
+
+    resize() {
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+        if (this.camera) {
+            this.camera.width = this.canvas.width;
+            this.camera.height = this.canvas.height;
+        }
+    }
+
+    loadLevel(lvl) {
+        this.platforms = [];
+        this.enemies = [];
+        this.benches = [];
+        this.boss = null;
+        this.particles = [];
+        this.slashes = [];
+        
+        // Level Design Procedural Generation / Hardcoded chunks
+        // Floor
+        for(let i=0; i<50; i++) {
+            this.platforms.push(new Platform(i*TILE_SIZE, 500, TILE_SIZE, TILE_SIZE));
+        }
+        
+        // Platforms
+        this.platforms.push(new Platform(300, 400, 100, 20));
+        this.platforms.push(new Platform(500, 300, 100, 20));
+        this.platforms.push(new Platform(200, 200, 150, 20));
+        
+        // Walls
+        this.platforms.push(new Platform(-50, 0, 50, 1000));
+        this.platforms.push(new Platform(2000, 0, 50, 1000));
+        
+        // Spikes
+        this.platforms.push(new Platform(800, 480, 120, 20, 'spike'));
+
+        // Entities
+        this.player = new Player(100, 400);
+        this.camera.follow(this.player);
+        
+        // Enemies
+        this.enemies.push(new Enemy(400, 350, 'crawler'));
+        this.enemies.push(new Enemy(600, 250, 'guard'));
+        this.enemies.push(new Enemy(900, 450, 'crawler'));
+
+        // Bench
+        const bench = new Bench(150, 480);
+        this.benches.push(bench);
+        
+        // Boss Arena
+        this.platforms.push(new Platform(1200, 500, 400, 50));
+        this.platforms.push(new Platform(1200, 300, 100, 20));
+        this.platforms.push(new Platform(1500, 300, 100, 20));
+        
+        this.boss = new Boss(1400, 400);
+        
+        this.ui.init(5);
+        this.ui.setArea("Crossroads");
+        this.ui.updateHealth();
+    }
+
+    resetLevel() {
+        // Respawn at last bench or start
+        const spawnX = this.benches.find(b => b.lit)?.x || 100;
+        const spawnY = this.benches.find(b => b.lit)?.y || 400;
+        
+        this.player.x = spawnX;
+        this.player.y = spawnY - 50;
+        this.player.hp = this.player.maxHp;
+        this.player.dead = false;
+        this.player.vx = 0;
+        this.player.vy = 0;
+        
+        // Respawn enemies except boss if dead? For now, reset all
+        this.loadLevel(1); 
+        this.player.x = spawnX;
+        this.player.y = spawnY - 50;
+        this.ui.updateHealth();
+    }
+
+    spawnParticles(x, y, color, speed, count) {
+        for(let i=0; i<count; i++) {
+            this.particles.push(new Particle(x, y, color, speed, 30));
+        }
+    }
+    
+    showDamageText(x, y, text) {
+        const el = document.createElement('div');
+        el.className = 'damage-text';
+        el.innerText = text;
+        el.style.left = (x - this.camera.x) + 'px';
+        el.style.top = (y - this.camera.y) + 'px';
+        document.body.appendChild(el);
+        setTimeout(() => el.remove(), 1000);
+    }
+    
+    showMessage(text) {
+        const el = document.createElement('div');
+        el.style.position = 'absolute';
+        el.style.top = '50%';
+        el.style.left = '50%';
+        el.style.transform = 'translate(-50%, -50%)';
+        el.style.color = '#fff';
+        el.style.fontSize = '24px';
+        el.style.textShadow = '0 0 10px #000';
+        el.style.pointerEvents = 'none';
+        el.innerText = text;
+        document.body.appendChild(el);
+        setTimeout(() => el.remove(), 2000);
+    }
+
+    update() {
+        if (this.input.isDown('KeyR')) {
+            this.resetLevel();
+            return;
+        }
+
+        this.player.update(this.input, this.platforms, [...this.enemies, this.boss].filter(e => e));
+        
+        this.enemies.forEach(e => e.update(this.player, this.platforms));
+        if (this.boss) this.boss.update(this.player, this.platforms);
+        
+        this.camera.update();
+        
+        // Particles
+        this.particles.forEach((p, i) => {
+            p.update();
+            if (p.life <= 0) this.particles.splice(i, 1);
+        });
+        
+        // Slashes
+        this.slashes.forEach((s, i) => {
+            s.life--;
+            if (s.life <= 0) this.slashes.splice(i, 1);
+        });
+    }
+
+    draw() {
+        // Clear Background
+        this.ctx.fillStyle = '#050505';
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+        // Parallax Background (Simple stars/dust)
+        this.ctx.fillStyle = '#111';
+        for(let i=0; i<20; i++) {
+            const x = ((i * 137) % 2000) - this.camera.x * 0.5;
+            const y = ((i * 53) % 1000) - this.camera.y * 0.5;
+            // Wrap around logic omitted for simplicity, just draw relative
+            this.ctx.beginPath();
+            this.ctx.arc((i*100)%this.canvas.width, (i*50)%this.canvas.height, 2, 0, Math.PI*2);
+            this.ctx.fill();
+        }
+
+        // Draw World
+        this.platforms.forEach(p => p.draw(this.ctx, this.camera.x, this.camera.y));
+        this.benches.forEach(b => b.draw(this.ctx, this.camera.x, this.camera.y));
+        
+        this.enemies.forEach(e => e.draw(this.ctx, this.camera.x, this.camera.y));
+        if (this.boss && !this.boss.dead) this.boss.draw(this.ctx, this.camera.x, this.camera.y);
+        
+        this.player.draw(this.ctx, this.camera.x, this.camera.y);
+        
+        // Particles
+        this.particles.forEach(p => p.draw(this.ctx, this.camera.x, this.camera.y));
+        
+        // Slashes
+        this.ctx.strokeStyle = '#fff';
+        this.ctx.lineWidth = 4;
+        this.slashes.forEach(s => {
+            this.ctx.globalAlpha = s.life / 10;
+            this.ctx.beginPath();
+            if (s.facing) {
+                this.ctx.arc(s.x - this.camera.x + s.w/2, s.y - this.camera.y + s.h/2, s.w/2, -Math.PI/4, Math.PI/4);
+            } else {
+                this.ctx.arc(s.x - this.camera.x + s.w/2, s.y - this.camera.y + s.h/2, s.w/2, Math.PI - Math.PI/4, Math.PI + Math.PI/4);
+            }
+            this.ctx.stroke();
+            this.ctx.globalAlpha = 1;
+        });
+    }
+
+    loop() {
+        this.update();
+        this.draw();
+        requestAnimationFrame(this.loop);
+    }
+}
+
+// Start Game
+const game = new Game();
+
+</script>
+</body>
+</html>
